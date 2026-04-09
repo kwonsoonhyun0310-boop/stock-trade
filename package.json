@@ -1,0 +1,20 @@
+{
+  "name": "kis-codex-trade-dashboard",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "concurrently \"npm run dev:server\" \"npm run dev:web\"",
+    "dev:server": "npm run dev -w @trade/server",
+    "dev:web": "npm run dev -w @trade/web",
+    "build": "npm run build -w @trade/shared && npm run build -w @trade/server && npm run build -w @trade/web",
+    "lint": "npm run lint -w @trade/shared && npm run lint -w @trade/server && npm run lint -w @trade/web",
+    "start": "npm run start -w @trade/server"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1",
+    "typescript": "^5.9.2"
+  }
+}
