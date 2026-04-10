@@ -10,11 +10,14 @@ const updateSettingsSchema = z.object({
   watchSymbols: z.array(z.string()).optional()
 });
 
-const manualOrderSchema = z.object({
-  side: z.enum(["buy", "sell"]),
+const oneClickBuySchema = z.object({
   symbol: z.string().min(1).max(10),
   exchange: z.enum(["NASD", "NYSE", "AMEX"]),
   quantity: z.number().int().positive(),
+  limitPrice: z.number().positive()
+});
+
+const modifyBuyOrderSchema = z.object({
   limitPrice: z.number().positive()
 });
 
@@ -46,10 +49,55 @@ export const createTradingRouter = (tradingService: TradingService) => {
   );
 
   router.post(
-    "/order",
+    "/profit-ledger/backfill",
+    asyncHandler(async (_request, response) => {
+      const result = await tradingService.backfillProfitLedgerHistory(true);
+      response.json(result);
+    })
+  );
+
+  router.post(
+    "/one-click-buy/precheck",
     asyncHandler(async (request, response) => {
-      const payload = manualOrderSchema.parse(request.body);
-      const result = await tradingService.submitManualOrder(payload);
+      const payload = oneClickBuySchema.parse(request.body);
+      const result = await tradingService.precheckOneClickBuy(payload);
+      response.json(result);
+    })
+  );
+
+  router.post(
+    "/one-click-buy",
+    asyncHandler(async (request, response) => {
+      const payload = oneClickBuySchema.parse(request.body);
+      const result = await tradingService.submitOneClickBuy(payload);
+      response.json(result);
+    })
+  );
+
+  router.post(
+    "/targets/:targetId/cancel",
+    asyncHandler(async (request, response) => {
+      const targetId = z.string().uuid().parse(request.params.targetId);
+      const result = await tradingService.cancelAutoSellTarget(targetId);
+      response.json(result);
+    })
+  );
+
+  router.post(
+    "/targets/:targetId/buy-order/modify",
+    asyncHandler(async (request, response) => {
+      const targetId = z.string().uuid().parse(request.params.targetId);
+      const payload = modifyBuyOrderSchema.parse(request.body);
+      const result = await tradingService.modifyBuyOrder(targetId, payload.limitPrice);
+      response.json(result);
+    })
+  );
+
+  router.post(
+    "/targets/:targetId/buy-order/cancel",
+    asyncHandler(async (request, response) => {
+      const targetId = z.string().uuid().parse(request.params.targetId);
+      const result = await tradingService.cancelBuyOrder(targetId);
       response.json(result);
     })
   );

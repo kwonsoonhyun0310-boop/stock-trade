@@ -11,7 +11,7 @@ dotenv.config({ quiet: true });
 const booleanString = z
   .enum(["true", "false"])
   .optional()
-  .default("false")
+  .default("true")
   .transform((value) => value === "true");
 
 const envSchema = z.object({
@@ -26,7 +26,7 @@ const envSchema = z.object({
   KIS_USD_EXCHANGE_CODES: z.string().optional().default("NASD,NYSE,AMEX"),
   AUTO_SELL_ENABLED: booleanString,
   AUTO_SELL_TARGET_PERCENT: z.coerce.number().optional().default(5),
-  AUTO_SELL_POLL_INTERVAL_MS: z.coerce.number().optional().default(45_000),
+  AUTO_SELL_POLL_INTERVAL_MS: z.coerce.number().optional().default(5_000),
   CODEX_CLI_PATH: z.string().optional().default("codex"),
   CODEX_MODEL: z.string().optional().default("gpt-5.2-codex"),
   MARKET_CACHE_TTL_MS: z.coerce.number().optional().default(900_000),

@@ -62,7 +62,13 @@ export class CodexCliProvider {
       "Use the structured market data below.",
       "Do not give personalized financial advice or tell the user what to buy.",
       "Focus on market structure, quality leaders, trend strength, and key risks.",
+      "The first section must explain the market structure first.",
+      "It must clearly say whether the market is 전체적으로 상향세, 전체적으로 하향세, or 전체적으로 혼조세.",
+      "It must also explain the main reason in simple Korean.",
       "Return Korean text because the dashboard user is Korean.",
+      "Use simple Korean that even a child can follow.",
+      "Avoid shorthand like 1M or 3M.",
+      "Say '한 달 전보다' and '세 달 전보다' instead of abbreviations.",
       JSON.stringify(payload, null, 2)
     ].join("\n\n");
 
