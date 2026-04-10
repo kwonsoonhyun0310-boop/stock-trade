@@ -5,6 +5,7 @@ import { logger } from "./lib/logger.js";
 import { MarketAnalysisService } from "./modules/market/market-analysis.service.js";
 import { MarketDataService } from "./modules/market/market-data.service.js";
 import { SymbolSearchService } from "./modules/market/symbol-search.service.js";
+import { WatchlistMonitorService } from "./modules/market/watchlist-monitor.service.js";
 import { TradingService } from "./modules/trading/trading.service.js";
 import { createServer } from "./server.js";
 
@@ -15,10 +16,17 @@ const bootstrap = async () => {
   const marketDataService = new MarketDataService();
   const marketAnalysisService = new MarketAnalysisService(marketDataService, codexCliProvider);
   const symbolSearchService = new SymbolSearchService();
+  const watchlistMonitorService = new WatchlistMonitorService();
 
   await tradingService.init();
 
-  const app = createServer(tradingService, marketAnalysisService, codexCliProvider, symbolSearchService);
+  const app = createServer(
+    tradingService,
+    marketAnalysisService,
+    codexCliProvider,
+    symbolSearchService,
+    watchlistMonitorService
+  );
 
   app.listen(env.PORT, () => {
     logger.info(`Server listening on http://localhost:${env.PORT}`);

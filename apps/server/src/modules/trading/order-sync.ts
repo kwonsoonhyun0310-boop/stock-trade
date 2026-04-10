@@ -6,6 +6,7 @@ interface OrderQuantities {
   filledQuantity: number;
   openQuantity: number;
   orderPrice: number;
+  filledAveragePrice: number;
 }
 
 export interface BuyOrderSyncSnapshot extends OrderQuantities {
@@ -93,16 +94,23 @@ const readOrderQuantities = (row: {
   ft_ccld_qty?: string;
   nccs_qty?: string;
   ft_ord_unpr3?: string;
+  ft_ccld_unpr3?: string;
+  ft_ccld_amt3?: string;
 }): OrderQuantities => {
   const orderedQuantity = toNumber(row.ft_ord_qty);
   const filledQuantity = toNumber(row.ft_ccld_qty);
   const openQuantity = toNumber(row.nccs_qty);
+  const filledAmount = toNumber(row.ft_ccld_amt3);
+  const filledAveragePrice =
+    (filledAmount > 0 && filledQuantity > 0 ? filledAmount / filledQuantity : 0) ||
+    toNumber(row.ft_ccld_unpr3);
 
   return {
     orderedQuantity: Math.max(orderedQuantity, filledQuantity + openQuantity),
     filledQuantity,
     openQuantity,
-    orderPrice: toNumber(row.ft_ord_unpr3)
+    orderPrice: toNumber(row.ft_ord_unpr3),
+    filledAveragePrice
   };
 };
 
@@ -146,14 +154,16 @@ export const resolveBuyOrderSyncSnapshot = (
         orderedQuantity: Math.max(current.orderedQuantity, next.orderedQuantity),
         filledQuantity: Math.max(current.filledQuantity, next.filledQuantity),
         openQuantity: current.openQuantity,
-        orderPrice: current.orderPrice > 0 ? current.orderPrice : next.orderPrice
+        orderPrice: current.orderPrice > 0 ? current.orderPrice : next.orderPrice,
+        filledAveragePrice: current.filledAveragePrice > 0 ? current.filledAveragePrice : next.filledAveragePrice
       };
     },
     {
       orderedQuantity: latestQuantities.orderedQuantity,
       filledQuantity: latestQuantities.filledQuantity,
       openQuantity: latestQuantities.openQuantity,
-      orderPrice: latestQuantities.orderPrice
+      orderPrice: latestQuantities.orderPrice,
+      filledAveragePrice: latestQuantities.filledAveragePrice
     }
   );
   const isRejected = isRejectedRow(latestHistoryRow);
@@ -215,6 +225,11 @@ export const resolveSellOrderCompletionSnapshot = (
     symbol: event.symbol,
     exchange: event.exchange,
     quantity: quantities.filledQuantity,
-    orderPrice: quantities.orderPrice > 0 ? quantities.orderPrice : event.orderPrice
+    orderPrice:
+      quantities.filledAveragePrice > 0
+        ? quantities.filledAveragePrice
+        : quantities.orderPrice > 0
+          ? quantities.orderPrice
+          : event.orderPrice
   };
 };

@@ -6,6 +6,7 @@ import { asyncHandler } from "./lib/async-handler.js";
 import { createMarketRouter } from "./modules/market/market.routes.js";
 import type { MarketAnalysisService } from "./modules/market/market-analysis.service.js";
 import type { SymbolSearchService } from "./modules/market/symbol-search.service.js";
+import type { WatchlistMonitorService } from "./modules/market/watchlist-monitor.service.js";
 import { createTradingRouter } from "./modules/trading/trading.routes.js";
 import type { TradingService } from "./modules/trading/trading.service.js";
 import type { CodexCliProvider } from "./integrations/ai/codex-cli-provider.js";
@@ -14,7 +15,8 @@ export const createServer = (
   tradingService: TradingService,
   marketAnalysisService: MarketAnalysisService,
   codexCliProvider: CodexCliProvider,
-  symbolSearchService: SymbolSearchService
+  symbolSearchService: SymbolSearchService,
+  watchlistMonitorService: WatchlistMonitorService
 ) => {
   const app = express();
 
@@ -54,7 +56,10 @@ export const createServer = (
   );
 
   app.use("/api/trading", createTradingRouter(tradingService));
-  app.use("/api/market", createMarketRouter(marketAnalysisService, symbolSearchService));
+  app.use(
+    "/api/market",
+    createMarketRouter(marketAnalysisService, symbolSearchService, watchlistMonitorService)
+  );
 
   app.use((error: unknown, _request: express.Request, response: express.Response, _next: express.NextFunction) => {
     response.status(500).json({

@@ -9,6 +9,7 @@ interface HistoricalFill {
   side: "buy" | "sell";
   quantity: number;
   fillPrice: number;
+  fillAmount: number;
   completedAt: string;
   sortKey: string;
 }
@@ -110,7 +111,11 @@ const toHistoricalFill = (row: KisOrderHistoryRow): HistoricalFill | null => {
   }
 
   const quantity = toNumber(row.ft_ccld_qty);
-  const fillPrice = toNumber(row.ft_ccld_unpr3) || toNumber(row.ft_ord_unpr3);
+  const fillAmount = toNumber(row.ft_ccld_amt3);
+  const fillPrice =
+    (fillAmount > 0 && quantity > 0 ? fillAmount / quantity : 0) ||
+    toNumber(row.ft_ccld_unpr3) ||
+    toNumber(row.ft_ord_unpr3);
   const orderNumber = normalizeText(row.odno);
 
   if (!orderNumber || quantity <= 0 || fillPrice <= 0) {
@@ -130,6 +135,7 @@ const toHistoricalFill = (row: KisOrderHistoryRow): HistoricalFill | null => {
     side,
     quantity,
     fillPrice,
+    fillAmount,
     completedAt: toOrderIsoDate(normalizeText(row.ord_dt), normalizeText(row.ord_tmd)),
     sortKey: getSortKey(row)
   };
@@ -145,7 +151,11 @@ const aggregateHistoricalFills = (rows: KisOrderHistoryRow[]) => {
       continue;
     }
 
-    latestRowByOrder.set(fill.orderNumber, fill);
+    const current = latestRowByOrder.get(fill.orderNumber);
+
+    if (!current || fill.quantity >= current.quantity || fill.sortKey >= current.sortKey) {
+      latestRowByOrder.set(fill.orderNumber, fill);
+    }
   }
 
   return [...latestRowByOrder.values()].sort((left, right) => left.sortKey.localeCompare(right.sortKey));
@@ -171,13 +181,15 @@ export const buildHistoricalProfitLedgerEntries = (rows: KisOrderHistoryRow[]) =
 
     let remainingQuantity = fill.quantity;
     let totalCostBasis = 0;
+    let matchedQuantity = 0;
 
     while (remainingQuantity > 0 && lots.length > 0) {
       const lot = lots[0];
-      const matchedQuantity = Math.min(remainingQuantity, lot.quantity);
-      totalCostBasis += matchedQuantity * lot.price;
-      lot.quantity -= matchedQuantity;
-      remainingQuantity -= matchedQuantity;
+      const lotMatchedQuantity = Math.min(remainingQuantity, lot.quantity);
+      totalCostBasis += lotMatchedQuantity * lot.price;
+      lot.quantity -= lotMatchedQuantity;
+      remainingQuantity -= lotMatchedQuantity;
+      matchedQuantity += lotMatchedQuantity;
 
       if (lot.quantity <= 0) {
         lots.shift();
@@ -205,6 +217,9 @@ export const buildHistoricalProfitLedgerEntries = (rows: KisOrderHistoryRow[]) =
       realizedProfitUsd: Number(realizedProfitUsd.toFixed(2)),
       realizedProfitPercent: Number(realizedProfitPercent.toFixed(2)),
       targetProfitPercent: 0,
+      costBasisMode: remainingQuantity > 0 ? "estimated_fifo" : "exact_fifo",
+      matchedQuantity: Number(matchedQuantity.toFixed(2)),
+      estimatedQuantity: Number(remainingQuantity.toFixed(2)),
       completedAt: fill.completedAt,
       orderNumber: fill.orderNumber
     });

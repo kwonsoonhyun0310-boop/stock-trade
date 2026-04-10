@@ -19,6 +19,9 @@ const percentFormat = new Intl.NumberFormat("ko-KR", {
 const getProfitTone = (value: number) =>
   value > 0 ? "profit-positive" : value < 0 ? "profit-negative" : "profit-neutral";
 
+const getCostBasisLabel = (mode: ProfitLedgerSnapshot["recentEntries"][number]["costBasisMode"]) =>
+  mode === "exact_fifo" ? "정확 매칭" : "추정 포함";
+
 export function ProfitLedgerPanel({ ledger }: ProfitLedgerPanelProps) {
   return (
     <section className="panel profit-ledger-panel">
@@ -27,12 +30,14 @@ export function ProfitLedgerPanel({ ledger }: ProfitLedgerPanelProps) {
           <p className="eyebrow">Profit Ledger</p>
           <h2>실현 손익 장부</h2>
           <p className="empty-state compact-empty-state">
-            한국투자증권 해외주식 체결내역을 기준으로, 같은 종목의 과거 매수 lot을 순서대로 맞춰 계산한 누적 손익입니다.
+            한국투자증권 해외주식 체결내역을 기준으로 FIFO로 맞춘 장부입니다. 오래된 매수 lot이 조회 구간 밖이면 해당 수량은 추정 포함으로 표시합니다.
           </p>
         </div>
         <div className="ledger-header-meta">
           <span>누적 수익 {usdCurrency.format(ledger.totalRealizedProfitUsd)}</span>
           <span>완료 {ledger.totalTradeCount}건</span>
+          <span>정확 매칭 {ledger.exactTradeCount}건</span>
+          <span>추정 포함 {ledger.estimatedTradeCount}건</span>
           <span>마지막 집계 {new Date(ledger.updatedAt).toLocaleString()}</span>
         </div>
       </div>
@@ -63,6 +68,7 @@ export function ProfitLedgerPanel({ ledger }: ProfitLedgerPanelProps) {
                 <th>수량</th>
                 <th>매수가</th>
                 <th>매도가</th>
+                <th>계산 방식</th>
                 <th>실현 수익</th>
               </tr>
             </thead>
@@ -77,6 +83,14 @@ export function ProfitLedgerPanel({ ledger }: ProfitLedgerPanelProps) {
                   <td>{entry.quantity.toFixed(0)}주</td>
                   <td>{usdCurrency.format(entry.entryPrice)}</td>
                   <td>{usdCurrency.format(entry.exitPrice)}</td>
+                  <td>
+                    <strong>{getCostBasisLabel(entry.costBasisMode)}</strong>
+                    <span>
+                      {entry.costBasisMode === "exact_fifo"
+                        ? `${entry.matchedQuantity.toFixed(0)}주 전량 매칭`
+                        : `${entry.matchedQuantity.toFixed(0)}주 매칭 / ${entry.estimatedQuantity.toFixed(0)}주 추정`}
+                    </span>
+                  </td>
                   <td className={entry.realizedProfitUsd >= 0 ? "profit-up" : "profit-down"}>
                     <strong>{usdCurrency.format(entry.realizedProfitUsd)}</strong>
                     <span>{percentFormat.format(entry.realizedProfitPercent)}%</span>

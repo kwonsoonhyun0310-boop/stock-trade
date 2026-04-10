@@ -37,6 +37,16 @@ const PROFIT_LEDGER_RANGES: Array<{
 const getLedgerIdentity = (entry: Pick<ProfitLedgerEntry, "sourceEventId" | "orderNumber">) =>
   entry.orderNumber ? `order:${entry.orderNumber}` : `event:${entry.sourceEventId}`;
 
+const getLedgerEntryPriority = (entry: ProfitLedgerEntry) => {
+  let priority = entry.costBasisMode === "exact_fifo" ? 2 : 1;
+
+  if (entry.orderNumber?.startsWith("history-")) {
+    priority += 1;
+  }
+
+  return priority;
+};
+
 const inferEntryPrice = (event: AutoSellEvent) => {
   if (Number.isFinite(event.entryPrice) && (event.entryPrice ?? 0) > 0) {
     return toRoundedNumber(event.entryPrice ?? 0);
@@ -78,26 +88,39 @@ export const normalizeProfitLedgerEntry = (entry: ProfitLedgerEntry): ProfitLedg
     targetProfitPercent: Number.isFinite(entry.targetProfitPercent)
       ? toRoundedNumber(entry.targetProfitPercent)
       : 0,
+    costBasisMode: entry.costBasisMode === "exact_fifo" ? "exact_fifo" : "estimated_fifo",
+    matchedQuantity: Number.isFinite(entry.matchedQuantity) ? toRoundedNumber(entry.matchedQuantity) : 0,
+    estimatedQuantity: Number.isFinite(entry.estimatedQuantity) ? toRoundedNumber(entry.estimatedQuantity) : quantity,
     completedAt: entry.completedAt || new Date(0).toISOString()
   };
 };
 
 export const dedupeProfitLedgerEntries = (entries: ProfitLedgerEntry[]) => {
-  const seen = new Set<string>();
+  const pickedEntries = new Map<string, ProfitLedgerEntry>();
 
-  return [...entries]
-    .map(normalizeProfitLedgerEntry)
-    .sort((left, right) => right.completedAt.localeCompare(left.completedAt))
-    .filter((entry) => {
-      const identity = getLedgerIdentity(entry);
+  for (const entry of [...entries].map(normalizeProfitLedgerEntry)) {
+    const identity = getLedgerIdentity(entry);
+    const current = pickedEntries.get(identity);
 
-      if (seen.has(identity)) {
-        return false;
-      }
+    if (!current) {
+      pickedEntries.set(identity, entry);
+      continue;
+    }
 
-      seen.add(identity);
-      return true;
-    });
+    const currentPriority = getLedgerEntryPriority(current);
+    const nextPriority = getLedgerEntryPriority(entry);
+
+    if (nextPriority > currentPriority) {
+      pickedEntries.set(identity, entry);
+      continue;
+    }
+
+    if (nextPriority === currentPriority && entry.completedAt > current.completedAt) {
+      pickedEntries.set(identity, entry);
+    }
+  }
+
+  return [...pickedEntries.values()].sort((left, right) => right.completedAt.localeCompare(left.completedAt));
 };
 
 export const createProfitLedgerEntryFromEvent = (event: AutoSellEvent): ProfitLedgerEntry | null => {
@@ -122,6 +145,9 @@ export const createProfitLedgerEntryFromEvent = (event: AutoSellEvent): ProfitLe
     realizedProfitUsd,
     realizedProfitPercent,
     targetProfitPercent: toRoundedNumber(event.targetProfitPercent),
+    costBasisMode: "estimated_fifo",
+    matchedQuantity: 0,
+    estimatedQuantity: event.quantity,
     completedAt: event.createdAt,
     orderNumber: event.orderNumber
   };
@@ -208,6 +234,8 @@ export const summarizeProfitLedger = (
       normalizedEntries.reduce((sum, entry) => sum + entry.realizedProfitUsd, 0)
     ),
     totalTradeCount: normalizedEntries.length,
+    exactTradeCount: normalizedEntries.filter((entry) => entry.costBasisMode === "exact_fifo").length,
+    estimatedTradeCount: normalizedEntries.filter((entry) => entry.costBasisMode === "estimated_fifo").length,
     ranges: PROFIT_LEDGER_RANGES.map((range) => summarizeRange(normalizedEntries, range, safeEndAt)),
     recentEntries: normalizedEntries.slice(0, 12)
   };

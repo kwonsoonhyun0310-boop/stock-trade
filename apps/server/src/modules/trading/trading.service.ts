@@ -10,6 +10,7 @@ import type {
   OneClickBuyRequest,
   OneClickBuyResponse,
   ProfitLedgerEntry,
+  TradingOrderQueueItem,
   TradingStatus
 } from "@trade/shared";
 import { APP_ROOT, env } from "../../config/env.js";
@@ -22,6 +23,17 @@ import {
   resolveSellOrderCompletionSnapshot
 } from "./order-sync.js";
 import {
+  deferQueueItemUntilNextCheck,
+  getDueQueueItem,
+  markQueueItemBlocked,
+  markQueueItemRetryWaiting,
+  markQueueItemRunning,
+  normalizeOrderQueueItem,
+  shouldRetryOrderError,
+  upsertAutoSellQueueItem,
+  upsertManualQueueItem
+} from "./order-queue.js";
+import {
   createProfitLedgerEntryFromEvent as createLedgerEntryFromEvent,
   dedupeProfitLedgerEntries as dedupeLedgerEntries,
   summarizeProfitLedger as summarizeLedger
@@ -32,6 +44,7 @@ interface TradingState {
   settings: AutoSellSettings;
   recentEvents: AutoSellEvent[];
   autoSellTargets: AutoSellTarget[];
+  orderQueue: TradingOrderQueueItem[];
 }
 
 interface ProfitLedgerState {
@@ -91,8 +104,8 @@ const targetStatusRank: Record<AutoSellTarget["status"], number> = {
   completed: 2
 };
 
-const HISTORY_IMPORT_LOOKBACK_DAYS = 1_095;
-const HISTORY_IMPORT_WINDOW_DAYS = 90;
+const HISTORY_IMPORT_LOOKBACK_DAYS = 1_825;
+const HISTORY_IMPORT_WINDOW_DAYS = 120;
 const HISTORY_IMPORT_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
 interface CheckOptions {
@@ -114,7 +127,8 @@ export class TradingService {
     {
       settings: DEFAULT_SETTINGS,
       recentEvents: [],
-      autoSellTargets: []
+      autoSellTargets: [],
+      orderQueue: []
     }
   );
   private readonly profitLedgerStore = new JsonStore<ProfitLedgerState>(
@@ -127,6 +141,7 @@ export class TradingService {
   private settings = DEFAULT_SETTINGS;
   private recentEvents: AutoSellEvent[] = [];
   private autoSellTargets: AutoSellTarget[] = [];
+  private orderQueue: TradingOrderQueueItem[] = [];
   private profitLedgerEntries: ProfitLedgerEntry[] = [];
   private historyImportedAt?: string;
   private holdings: HoldingSnapshot[] = [];
@@ -136,6 +151,8 @@ export class TradingService {
   private autoCheckCooldownUntil?: number;
   private timer?: NodeJS.Timeout;
   private runningCheck?: Promise<void>;
+  private queueTimer?: NodeJS.Timeout;
+  private runningQueueJob?: Promise<void>;
 
   constructor(private readonly kisClient: KisClient) {}
 
@@ -150,6 +167,7 @@ export class TradingService {
     this.autoSellTargets = Array.isArray(state.autoSellTargets)
       ? state.autoSellTargets.map(normalizeTarget)
       : [];
+    this.orderQueue = Array.isArray(state.orderQueue) ? state.orderQueue.map(normalizeOrderQueueItem) : [];
     const backfilledLedgerEntries = this.recentEvents
       .map((event) => createLedgerEntryFromEvent(event))
       .filter((entry): entry is ProfitLedgerEntry => Boolean(entry));
@@ -158,6 +176,7 @@ export class TradingService {
       : dedupeLedgerEntries(backfilledLedgerEntries);
     this.historyImportedAt = profitLedgerState.historyImportedAt;
     this.applyTimer();
+    this.applyQueueWorker();
     if (previousEnabled !== this.settings.enabled) {
       await this.persist();
     }
@@ -172,6 +191,7 @@ export class TradingService {
       lastError: this.lastError,
       holdings: this.holdings,
       accountSummary: this.accountSummary,
+      orderQueue: [...this.orderQueue].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt)),
       autoSellTargets: [...this.autoSellTargets].sort((left, right) => {
         if (left.status !== right.status) {
           return targetStatusRank[left.status] - targetStatusRank[right.status];
@@ -292,13 +312,11 @@ export class TradingService {
     const symbol = input.symbol.trim().toUpperCase();
     const quantity = Math.floor(input.quantity);
     const limitPrice = toRoundedPrice(input.limitPrice);
-    const result = await this.kisClient.placeOrder({
-      symbol,
-      exchange: input.exchange,
-      quantity,
-      limitPrice,
-      side: "buy"
-    });
+    const duplicatePendingTarget = this.findRecentPendingBuyTarget(symbol, input.exchange, quantity, limitPrice);
+
+    if (duplicatePendingTarget) {
+      throw new Error("같은 매수 주문이 이미 처리 중입니다. 주문 상태 또는 재시도 큐를 확인하세요.");
+    }
 
     const submittedAt = new Date().toISOString();
     const targetProfitPercent = this.settings.targetProfitPercent;
@@ -318,11 +336,17 @@ export class TradingService {
       buyFilledQuantity: 0,
       buyOpenQuantity: quantity,
       createdAt: submittedAt,
-      buyOrderNumber: result.ODNO,
       buyOrderUpdatedAt: submittedAt
     };
 
     this.autoSellTargets = [target, ...this.autoSellTargets].slice(0, 100);
+    this.orderQueue = upsertManualQueueItem(this.orderQueue, {
+      kind: "one_click_buy",
+      target,
+      quantity,
+      limitPrice,
+      queuedAt: submittedAt
+    }).queue;
 
     if (!this.settings.enabled) {
       this.settings = {
@@ -332,35 +356,48 @@ export class TradingService {
       this.applyTimer();
     }
 
-    this.pushEvent({
-      id: randomUUID(),
-      symbol,
-      exchange: input.exchange,
-      quantity,
-      entryPrice: limitPrice,
-      triggerProfitPercent: 0,
-      targetProfitPercent,
-      orderPrice: limitPrice,
-      status: "submitted",
-      reason: `원클릭 매수 주문 제출, ${targetProfitPercent.toFixed(2)}% 자동매도 등록`,
-      createdAt: submittedAt,
-      orderNumber: result.ODNO
-    });
-
     await this.persist();
+    await this.processOrderQueue();
 
-    return {
-      targetId: target.id,
-      symbol,
-      exchange: input.exchange,
-      quantity,
-      limitPrice,
-      targetProfitPercent,
-      targetPrice,
-      orderNumber: result.ODNO,
-      submittedAt,
-      message: "원클릭 매수 주문이 접수되었고 자동매도 추적이 시작되었습니다."
-    };
+    const nextTarget = this.autoSellTargets.find((entry) => entry.id === target.id);
+    const queuedItem = this.orderQueue.find(
+      (item) => item.targetId === target.id && item.kind === "one_click_buy"
+    );
+
+    if (!nextTarget) {
+      throw new Error("원클릭 매수 주문 상태를 확인할 수 없습니다.");
+    }
+
+    if (nextTarget.buyOrderNumber) {
+      return {
+        targetId: nextTarget.id,
+        symbol,
+        exchange: input.exchange,
+        quantity,
+        limitPrice,
+        targetProfitPercent,
+        targetPrice,
+        orderNumber: nextTarget.buyOrderNumber,
+        submittedAt,
+        message: "원클릭 매수 주문이 접수되었고 자동매도 추적이 시작되었습니다."
+      };
+    }
+
+    if (queuedItem && queuedItem.status !== "blocked") {
+      return {
+        targetId: nextTarget.id,
+        symbol,
+        exchange: input.exchange,
+        quantity,
+        limitPrice,
+        targetProfitPercent,
+        targetPrice,
+        submittedAt,
+        message: "원클릭 매수 주문이 재시도 큐에 등록되었습니다. 주문 상태에서 진행 상황을 확인하세요."
+      };
+    }
+
+    throw new Error(queuedItem?.lastError || "원클릭 매수 주문이 중단되었습니다.");
   }
 
   async cancelAutoSellTarget(targetId: string): Promise<TradingStatus> {
@@ -384,6 +421,7 @@ export class TradingService {
           }
         : entry
     );
+    this.orderQueue = this.orderQueue.filter((item) => item.targetId !== targetId);
 
     this.pushEvent({
       id: randomUUID(),
@@ -420,45 +458,33 @@ export class TradingService {
       throw new Error("새 매수가는 0보다 커야 합니다.");
     }
 
-    const result = await this.kisClient.reviseOrCancelOrder({
-      symbol: target.symbol,
-      exchange: target.exchange,
-      originalOrderNumber: target.buyOrderNumber,
-      quantity: Math.floor(target.buyOpenQuantity > 0 ? target.buyOpenQuantity : target.requestedQuantity),
-      limitPrice,
-      action: "modify"
-    });
-
-    const updatedAt = new Date().toISOString();
-    this.autoSellTargets = this.autoSellTargets.map((entry) =>
-      entry.id === targetId
-        ? {
-            ...entry,
-            entryPrice: limitPrice,
-            targetPrice: toRoundedPrice(limitPrice * (1 + entry.targetProfitPercent / 100)),
-            buyOrderNumber: result.ODNO || entry.buyOrderNumber,
-            buyOrderStatus: "submitted",
-            buyOrderUpdatedAt: updatedAt
-          }
-        : entry
+    const hasPendingAction = this.orderQueue.some(
+      (item) =>
+        item.targetId === targetId &&
+        (item.kind === "buy_modify" || item.kind === "buy_cancel") &&
+        item.status !== "blocked"
     );
 
-    this.pushEvent({
-      id: randomUUID(),
-      symbol: target.symbol,
-      exchange: target.exchange,
-      quantity: target.requestedQuantity,
-      entryPrice: limitPrice,
-      triggerProfitPercent: 0,
-      targetProfitPercent: target.targetProfitPercent,
-      orderPrice: limitPrice,
-      status: "submitted",
-      reason: `사용자가 매수 주문 가격을 ${limitPrice.toFixed(2)} USD로 정정함`,
-      createdAt: updatedAt,
-      orderNumber: result.ODNO
-    });
+    if (hasPendingAction) {
+      throw new Error("이 매수 주문에는 이미 처리 중인 정정 또는 취소 작업이 있습니다.");
+    }
 
+    const updatedAt = new Date().toISOString();
+    this.orderQueue = upsertManualQueueItem(this.orderQueue, {
+      kind: "buy_modify",
+      target,
+      quantity: Math.floor(target.buyOpenQuantity > 0 ? target.buyOpenQuantity : target.requestedQuantity),
+      limitPrice,
+      queuedAt: updatedAt
+    }).queue;
     await this.persist();
+    await this.processOrderQueue();
+    const queueItem = this.orderQueue.find((item) => item.targetId === targetId && item.kind === "buy_modify");
+
+    if (queueItem?.status === "blocked") {
+      throw new Error(queueItem.lastError || "매수 주문 수정이 중단되었습니다.");
+    }
+
     return this.getStatus();
   }
 
@@ -473,42 +499,33 @@ export class TradingService {
       throw new Error("취소 가능한 매수 주문이 없습니다.");
     }
 
-    const result = await this.kisClient.reviseOrCancelOrder({
-      symbol: target.symbol,
-      exchange: target.exchange,
-      originalOrderNumber: target.buyOrderNumber,
-      quantity: Math.floor(target.buyOpenQuantity > 0 ? target.buyOpenQuantity : target.requestedQuantity),
-      action: "cancel"
-    });
-
-    const cancelledAt = new Date().toISOString();
-    this.autoSellTargets = this.autoSellTargets.map((entry) =>
-      entry.id === targetId
-        ? {
-            ...entry,
-            buyOrderStatus: "cancelled",
-            buyOpenQuantity: 0,
-            buyOrderUpdatedAt: cancelledAt
-          }
-        : entry
+    const hasPendingAction = this.orderQueue.some(
+      (item) =>
+        item.targetId === targetId &&
+        (item.kind === "buy_modify" || item.kind === "buy_cancel") &&
+        item.status !== "blocked"
     );
 
-    this.pushEvent({
-      id: randomUUID(),
-      symbol: target.symbol,
-      exchange: target.exchange,
-      quantity: target.requestedQuantity,
-      entryPrice: target.entryPrice,
-      triggerProfitPercent: 0,
-      targetProfitPercent: target.targetProfitPercent,
-      orderPrice: target.entryPrice,
-      status: "cancelled",
-      reason: "사용자가 원클릭 매수 주문을 취소함",
-      createdAt: cancelledAt,
-      orderNumber: result.ODNO
-    });
+    if (hasPendingAction) {
+      throw new Error("이 매수 주문에는 이미 처리 중인 정정 또는 취소 작업이 있습니다.");
+    }
 
+    const cancelledAt = new Date().toISOString();
+    this.orderQueue = upsertManualQueueItem(this.orderQueue, {
+      kind: "buy_cancel",
+      target,
+      quantity: Math.floor(target.buyOpenQuantity > 0 ? target.buyOpenQuantity : target.requestedQuantity),
+      limitPrice: target.entryPrice,
+      queuedAt: cancelledAt
+    }).queue;
     await this.persist();
+    await this.processOrderQueue();
+    const queueItem = this.orderQueue.find((item) => item.targetId === targetId && item.kind === "buy_cancel");
+
+    if (queueItem?.status === "blocked") {
+      throw new Error(queueItem.lastError || "매수 주문 취소가 중단되었습니다.");
+    }
+
     return this.getStatus();
   }
 
@@ -525,6 +542,17 @@ export class TradingService {
     this.timer = setInterval(() => {
       void this.runCheck();
     }, this.settings.pollIntervalMs);
+  }
+
+  private applyQueueWorker() {
+    if (this.queueTimer) {
+      clearInterval(this.queueTimer);
+      this.queueTimer = undefined;
+    }
+
+    this.queueTimer = setInterval(() => {
+      void this.processOrderQueue();
+    }, 1_000);
   }
 
   private async runCheck(options: CheckOptions = {}) {
@@ -636,6 +664,7 @@ export class TradingService {
           Math.floor(holding.orderableQuantity)
         ])
       );
+      this.pruneOrderQueue(holdingsByKey);
 
       for (const target of activeTargets) {
         const key = holdingKey(target.symbol, target.exchange);
@@ -659,49 +688,18 @@ export class TradingService {
         }
 
         const triggerProfitPercent = calculateProfitPercent(target.entryPrice, holding.currentPrice);
-
-        try {
-          const result = await this.kisClient.placeOrder({
-            symbol: target.symbol,
-            exchange: target.exchange,
-            quantity: availableQuantity,
-            limitPrice: holding.currentPrice,
-            side: "sell"
-          });
-
-          this.consumeTargetQuantity(target.id, availableQuantity);
-          availableQuantities.set(key, Math.max(0, (availableQuantities.get(key) ?? 0) - availableQuantity));
-
-          this.pushEvent({
-            id: randomUUID(),
-            symbol: target.symbol,
-            exchange: target.exchange,
-            quantity: availableQuantity,
-            entryPrice: target.entryPrice,
-            triggerProfitPercent,
-            targetProfitPercent: target.targetProfitPercent,
-            orderPrice: holding.currentPrice,
-            status: "submitted",
-            reason: "원클릭 매수로 등록된 수량이 목표 수익률에 도달해 자동매도 주문 제출",
-            createdAt: new Date().toISOString(),
-            orderNumber: result.ODNO
-          });
-        } catch (error) {
-          this.pushEvent({
-            id: randomUUID(),
-            symbol: target.symbol,
-            exchange: target.exchange,
-            quantity: availableQuantity,
-            entryPrice: target.entryPrice,
-            triggerProfitPercent,
-            targetProfitPercent: target.targetProfitPercent,
-            orderPrice: holding.currentPrice,
-            status: "failed",
-            reason: error instanceof Error ? error.message : "알 수 없는 주문 오류",
-            createdAt: new Date().toISOString()
-          });
-        }
+        const queuedAt = new Date().toISOString();
+        const queued = upsertAutoSellQueueItem(this.orderQueue, {
+          target,
+          quantity: availableQuantity,
+          limitPrice: holding.currentPrice,
+          triggerProfitPercent,
+          queuedAt
+        });
+        this.orderQueue = queued.queue;
       }
+
+      await this.processOrderQueue();
     } catch (error) {
       if (isRateLimitError(error) && !options.ignoreCooldown) {
         const retryAt = Date.now() + RATE_LIMIT_COOLDOWN_MS;
@@ -742,6 +740,38 @@ export class TradingService {
     }
   }
 
+  private findRecentPendingBuyTarget(
+    symbol: string,
+    exchange: AutoSellTarget["exchange"],
+    quantity: number,
+    limitPrice: number
+  ) {
+    const duplicateWindowMs = 30_000;
+    const now = Date.now();
+
+    return this.autoSellTargets.find((target) => {
+      if (
+        target.symbol !== symbol ||
+        target.exchange !== exchange ||
+        target.requestedQuantity !== quantity ||
+        toRoundedPrice(target.entryPrice) !== limitPrice ||
+        target.buyOrderNumber
+      ) {
+        return false;
+      }
+
+      const hasPendingQueueItem = this.orderQueue.some(
+        (item) => item.targetId === target.id && item.kind === "one_click_buy" && item.status !== "blocked"
+      );
+
+      if (!hasPendingQueueItem) {
+        return false;
+      }
+
+      return now - new Date(target.createdAt).getTime() <= duplicateWindowMs;
+    });
+  }
+
   private consumeTargetQuantity(targetId: string, quantity: number) {
     const completedAt = new Date().toISOString();
 
@@ -758,6 +788,512 @@ export class TradingService {
         completedAt: remainingQuantity > 0 ? target.completedAt : completedAt
       };
     });
+  }
+
+  private pruneOrderQueue(holdingsByKey: Map<string, HoldingSnapshot>) {
+    this.orderQueue = this.orderQueue.filter((item) => {
+      const target = this.autoSellTargets.find((entry) => entry.id === item.targetId);
+
+      if (!target) {
+        return false;
+      }
+
+      if (item.status === "blocked") {
+        return true;
+      }
+
+      if (item.kind === "auto_sell") {
+        return target.status === "armed" && target.remainingQuantity > 0 && holdingsByKey.has(holdingKey(target.symbol, target.exchange));
+      }
+
+      return target.status === "armed";
+    });
+  }
+
+  private async processOrderQueue() {
+    if (this.runningQueueJob) {
+      return this.runningQueueJob;
+    }
+
+    const nextItem = getDueQueueItem(this.orderQueue);
+
+    if (!nextItem) {
+      return;
+    }
+
+    this.runningQueueJob = this.executeOrderQueueItem(nextItem.id).finally(() => {
+      this.runningQueueJob = undefined;
+    });
+
+    return this.runningQueueJob;
+  }
+
+  private async executeOrderQueueItem(queueItemId: string) {
+    const queueItem = this.orderQueue.find((item) => item.id === queueItemId);
+
+    if (!queueItem) {
+      return;
+    }
+
+    const target = this.autoSellTargets.find((entry) => entry.id === queueItem.targetId);
+
+    if (!target) {
+      this.orderQueue = this.orderQueue.filter((item) => item.id !== queueItemId);
+      await this.persist();
+      return;
+    }
+
+    switch (queueItem.kind) {
+      case "one_click_buy":
+        await this.executeQueuedOneClickBuy(queueItem, target);
+        return;
+      case "buy_modify":
+        await this.executeQueuedBuyModify(queueItem, target);
+        return;
+      case "buy_cancel":
+        await this.executeQueuedBuyCancel(queueItem, target);
+        return;
+      default:
+        await this.executeQueuedAutoSell(queueItem, target);
+        return;
+    }
+  }
+
+  private async executeQueuedAutoSell(queueItem: TradingOrderQueueItem, target: AutoSellTarget) {
+    if (target.status !== "armed" || target.remainingQuantity <= 0) {
+      this.orderQueue = this.orderQueue.filter((item) => item.id !== queueItem.id);
+      await this.persist();
+      return;
+    }
+
+    const key = holdingKey(target.symbol, target.exchange);
+    const holding = this.holdings.find((entry) => holdingKey(entry.symbol, entry.exchange) === key);
+
+    if (!holding) {
+      this.orderQueue = this.orderQueue.filter((item) => item.id !== queueItem.id);
+      await this.persist();
+      return;
+    }
+
+    const availableQuantity = Math.min(Math.floor(target.remainingQuantity), Math.floor(holding.orderableQuantity));
+
+    if (availableQuantity <= 0) {
+      this.orderQueue = this.orderQueue.filter((item) => item.id !== queueItem.id);
+      await this.persist();
+      return;
+    }
+
+    if (holding.currentPrice < target.targetPrice) {
+      const deferredAt = new Date().toISOString();
+      this.orderQueue = this.orderQueue.map((item) =>
+        item.id === queueItem.id
+          ? deferQueueItemUntilNextCheck(
+              {
+                ...item,
+                quantity: availableQuantity,
+                limitPrice: holding.currentPrice,
+                triggerProfitPercent: calculateProfitPercent(target.entryPrice, holding.currentPrice)
+              },
+              new Date(Date.now() + this.settings.pollIntervalMs).toISOString(),
+              deferredAt
+            )
+          : item
+      );
+      await this.persist();
+      return;
+    }
+
+    const startedAt = new Date().toISOString();
+    const runningItem = this.markQueueItemRunningById(queueItem.id, {
+      quantity: availableQuantity,
+      limitPrice: holding.currentPrice,
+      triggerProfitPercent: calculateProfitPercent(target.entryPrice, holding.currentPrice)
+    }, startedAt);
+
+    if (!runningItem) {
+      return;
+    }
+
+    try {
+      const result = await this.kisClient.placeOrder({
+        symbol: target.symbol,
+        exchange: target.exchange,
+        quantity: runningItem.quantity,
+        limitPrice: runningItem.limitPrice,
+        side: "sell"
+      });
+
+      this.consumeTargetQuantity(target.id, runningItem.quantity);
+      this.orderQueue = this.orderQueue.filter((item) => item.id !== queueItem.id);
+      this.lastError = undefined;
+
+      this.pushEvent({
+        id: randomUUID(),
+        symbol: target.symbol,
+        exchange: target.exchange,
+        quantity: runningItem.quantity,
+        entryPrice: target.entryPrice,
+        triggerProfitPercent: runningItem.triggerProfitPercent,
+        targetProfitPercent: target.targetProfitPercent,
+        orderPrice: runningItem.limitPrice,
+        status: "submitted",
+        reason:
+          runningItem.attemptCount > 1
+            ? `자동매도 주문 재시도 ${runningItem.attemptCount - 1}회 후 제출`
+            : "원클릭 매수로 등록된 수량이 목표 수익률에 도달해 자동매도 주문 제출",
+        createdAt: new Date().toISOString(),
+        orderNumber: result.ODNO
+      });
+    } catch (error) {
+      await this.handleQueueFailure(queueItem.id, runningItem, error, {
+        retryMessagePrefix: "자동매도 주문",
+        blockedMessage: "자동매도 주문이 반복 실패해 재시도 큐에서 중단되었습니다.",
+        onBlocked: (errorMessage, blockedAt) => {
+          this.pushEvent({
+            id: randomUUID(),
+            symbol: target.symbol,
+            exchange: target.exchange,
+            quantity: runningItem.quantity,
+            entryPrice: target.entryPrice,
+            triggerProfitPercent: runningItem.triggerProfitPercent,
+            targetProfitPercent: target.targetProfitPercent,
+            orderPrice: runningItem.limitPrice,
+            status: "failed",
+            reason: errorMessage,
+            createdAt: blockedAt
+          });
+        }
+      });
+      return;
+    }
+
+    await this.persist();
+  }
+
+  private async executeQueuedOneClickBuy(queueItem: TradingOrderQueueItem, target: AutoSellTarget) {
+    const startedAt = new Date().toISOString();
+    const runningItem = this.markQueueItemRunningById(queueItem.id, undefined, startedAt);
+
+    if (!runningItem) {
+      return;
+    }
+
+    try {
+      const result = await this.kisClient.placeOrder({
+        symbol: target.symbol,
+        exchange: target.exchange,
+        quantity: runningItem.quantity,
+        limitPrice: runningItem.limitPrice,
+        side: "buy"
+      });
+      const completedAt = new Date().toISOString();
+
+      this.autoSellTargets = this.autoSellTargets.map((entry) =>
+        entry.id === target.id
+          ? {
+              ...entry,
+              buyOrderNumber: result.ODNO,
+              buyOrderStatus: "submitted",
+              buyOpenQuantity: runningItem.quantity,
+              buyOrderUpdatedAt: completedAt
+            }
+          : entry
+      );
+      this.orderQueue = this.orderQueue.filter((item) => item.id !== queueItem.id);
+      this.lastError = undefined;
+
+      this.pushEvent({
+        id: randomUUID(),
+        symbol: target.symbol,
+        exchange: target.exchange,
+        quantity: runningItem.quantity,
+        entryPrice: target.entryPrice,
+        triggerProfitPercent: 0,
+        targetProfitPercent: target.targetProfitPercent,
+        orderPrice: runningItem.limitPrice,
+        status: "submitted",
+        reason:
+          runningItem.attemptCount > 1
+            ? `원클릭 매수 주문 재시도 ${runningItem.attemptCount - 1}회 후 제출, ${target.targetProfitPercent.toFixed(2)}% 자동매도 등록`
+            : `원클릭 매수 주문 제출, ${target.targetProfitPercent.toFixed(2)}% 자동매도 등록`,
+        createdAt: completedAt,
+        orderNumber: result.ODNO
+      });
+    } catch (error) {
+      await this.handleQueueFailure(queueItem.id, runningItem, error, {
+        retryMessagePrefix: "원클릭 매수 주문",
+        blockedMessage: "원클릭 매수 주문이 반복 실패해 재시도 큐에서 중단되었습니다.",
+        onBlocked: (errorMessage, blockedAt) => {
+          this.autoSellTargets = this.autoSellTargets.map((entry) =>
+            entry.id === target.id
+              ? {
+                  ...entry,
+                  status: "cancelled",
+                  remainingQuantity: 0,
+                  buyOrderStatus: "rejected",
+                  buyOpenQuantity: 0,
+                  buyOrderUpdatedAt: blockedAt,
+                  cancelledAt: blockedAt
+                }
+              : entry
+          );
+          this.pushEvent({
+            id: randomUUID(),
+            symbol: target.symbol,
+            exchange: target.exchange,
+            quantity: runningItem.quantity,
+            entryPrice: target.entryPrice,
+            triggerProfitPercent: 0,
+            targetProfitPercent: target.targetProfitPercent,
+            orderPrice: runningItem.limitPrice,
+            status: "failed",
+            reason: errorMessage,
+            createdAt: blockedAt
+          });
+        }
+      });
+      return;
+    }
+
+    await this.persist();
+  }
+
+  private async executeQueuedBuyModify(queueItem: TradingOrderQueueItem, target: AutoSellTarget) {
+    if (target.status !== "armed" || !target.buyOrderNumber) {
+      this.orderQueue = this.orderQueue.filter((item) => item.id !== queueItem.id);
+      await this.persist();
+      return;
+    }
+
+    const startedAt = new Date().toISOString();
+    const runningItem = this.markQueueItemRunningById(queueItem.id, undefined, startedAt);
+
+    if (!runningItem) {
+      return;
+    }
+
+    try {
+      const result = await this.kisClient.reviseOrCancelOrder({
+        symbol: target.symbol,
+        exchange: target.exchange,
+        originalOrderNumber: target.buyOrderNumber,
+        quantity: runningItem.quantity,
+        limitPrice: runningItem.limitPrice,
+        action: "modify"
+      });
+      const completedAt = new Date().toISOString();
+
+      this.autoSellTargets = this.autoSellTargets.map((entry) =>
+        entry.id === target.id
+          ? {
+              ...entry,
+              entryPrice: runningItem.limitPrice,
+              targetPrice: toRoundedPrice(runningItem.limitPrice * (1 + entry.targetProfitPercent / 100)),
+              buyOrderNumber: result.ODNO || entry.buyOrderNumber,
+              buyOrderStatus: "submitted",
+              buyOrderUpdatedAt: completedAt
+            }
+          : entry
+      );
+      this.orderQueue = this.orderQueue.filter((item) => item.id !== queueItem.id);
+      this.lastError = undefined;
+
+      this.pushEvent({
+        id: randomUUID(),
+        symbol: target.symbol,
+        exchange: target.exchange,
+        quantity: target.requestedQuantity,
+        entryPrice: runningItem.limitPrice,
+        triggerProfitPercent: 0,
+        targetProfitPercent: target.targetProfitPercent,
+        orderPrice: runningItem.limitPrice,
+        status: "submitted",
+        reason:
+          runningItem.attemptCount > 1
+            ? `매수 주문 정정 재시도 ${runningItem.attemptCount - 1}회 후 적용`
+            : `사용자가 매수 주문 가격을 ${runningItem.limitPrice.toFixed(2)} USD로 정정함`,
+        createdAt: completedAt,
+        orderNumber: result.ODNO || target.buyOrderNumber
+      });
+    } catch (error) {
+      await this.handleQueueFailure(queueItem.id, runningItem, error, {
+        retryMessagePrefix: "매수 주문 정정",
+        blockedMessage: "매수 주문 정정이 반복 실패해 재시도 큐에서 중단되었습니다.",
+        onBlocked: (errorMessage, blockedAt) => {
+          this.pushEvent({
+            id: randomUUID(),
+            symbol: target.symbol,
+            exchange: target.exchange,
+            quantity: runningItem.quantity,
+            entryPrice: target.entryPrice,
+            triggerProfitPercent: 0,
+            targetProfitPercent: target.targetProfitPercent,
+            orderPrice: runningItem.limitPrice,
+            status: "failed",
+            reason: errorMessage,
+            createdAt: blockedAt,
+            orderNumber: target.buyOrderNumber
+          });
+        }
+      });
+      return;
+    }
+
+    await this.persist();
+  }
+
+  private async executeQueuedBuyCancel(queueItem: TradingOrderQueueItem, target: AutoSellTarget) {
+    if (target.status !== "armed" || !target.buyOrderNumber) {
+      this.orderQueue = this.orderQueue.filter((item) => item.id !== queueItem.id);
+      await this.persist();
+      return;
+    }
+
+    const startedAt = new Date().toISOString();
+    const runningItem = this.markQueueItemRunningById(queueItem.id, undefined, startedAt);
+
+    if (!runningItem) {
+      return;
+    }
+
+    try {
+      const result = await this.kisClient.reviseOrCancelOrder({
+        symbol: target.symbol,
+        exchange: target.exchange,
+        originalOrderNumber: target.buyOrderNumber,
+        quantity: runningItem.quantity,
+        action: "cancel"
+      });
+      const completedAt = new Date().toISOString();
+
+      this.autoSellTargets = this.autoSellTargets.map((entry) => {
+        if (entry.id !== target.id) {
+          return entry;
+        }
+
+        const hasFilledQuantity = entry.buyFilledQuantity > 0;
+        return {
+          ...entry,
+          remainingQuantity: hasFilledQuantity ? Math.min(entry.remainingQuantity, entry.buyFilledQuantity) : 0,
+          status: hasFilledQuantity ? entry.status : "cancelled",
+          buyOrderStatus: "cancelled",
+          buyOpenQuantity: 0,
+          buyOrderUpdatedAt: completedAt,
+          cancelledAt: hasFilledQuantity ? entry.cancelledAt : entry.cancelledAt ?? completedAt
+        };
+      });
+      this.orderQueue = this.orderQueue.filter((item) => item.id !== queueItem.id);
+      this.lastError = undefined;
+
+      this.pushEvent({
+        id: randomUUID(),
+        symbol: target.symbol,
+        exchange: target.exchange,
+        quantity: target.requestedQuantity,
+        entryPrice: target.entryPrice,
+        triggerProfitPercent: 0,
+        targetProfitPercent: target.targetProfitPercent,
+        orderPrice: target.entryPrice,
+        status: "cancelled",
+        reason:
+          runningItem.attemptCount > 1
+            ? "매수 주문 취소가 재시도 후 완료되었습니다."
+            : "사용자가 원클릭 매수 주문을 취소함",
+        createdAt: completedAt,
+        orderNumber: result.ODNO || target.buyOrderNumber
+      });
+    } catch (error) {
+      await this.handleQueueFailure(queueItem.id, runningItem, error, {
+        retryMessagePrefix: "매수 주문 취소",
+        blockedMessage: "매수 주문 취소가 반복 실패해 재시도 큐에서 중단되었습니다.",
+        onBlocked: (errorMessage, blockedAt) => {
+          this.pushEvent({
+            id: randomUUID(),
+            symbol: target.symbol,
+            exchange: target.exchange,
+            quantity: runningItem.quantity,
+            entryPrice: target.entryPrice,
+            triggerProfitPercent: 0,
+            targetProfitPercent: target.targetProfitPercent,
+            orderPrice: target.entryPrice,
+            status: "failed",
+            reason: errorMessage,
+            createdAt: blockedAt,
+            orderNumber: target.buyOrderNumber
+          });
+        }
+      });
+      return;
+    }
+
+    await this.persist();
+  }
+
+  private markQueueItemRunningById(
+    queueItemId: string,
+    overrides: Partial<Pick<TradingOrderQueueItem, "quantity" | "limitPrice" | "triggerProfitPercent">> | undefined,
+    startedAt: string
+  ) {
+    let runningItem: TradingOrderQueueItem | undefined;
+    this.orderQueue = this.orderQueue.map((item) => {
+      if (item.id !== queueItemId) {
+        return item;
+      }
+
+      runningItem = markQueueItemRunning(
+        {
+          ...item,
+          ...overrides
+        },
+        startedAt
+      );
+      return runningItem;
+    });
+
+    return runningItem;
+  }
+
+  private async handleQueueFailure(
+    queueItemId: string,
+    runningItem: TradingOrderQueueItem,
+    error: unknown,
+    options: {
+      retryMessagePrefix: string;
+      blockedMessage: string;
+      onBlocked?: (errorMessage: string, blockedAt: string) => void;
+    }
+  ) {
+    const errorMessage = error instanceof Error ? error.message : "알 수 없는 주문 오류";
+    const shouldRetry = shouldRetryOrderError(error, runningItem.attemptCount);
+
+    if (shouldRetry) {
+      let retrySnapshot: TradingOrderQueueItem | undefined;
+      this.orderQueue = this.orderQueue.map((item) => {
+        if (item.id !== queueItemId) {
+          return item;
+        }
+
+        retrySnapshot = markQueueItemRetryWaiting(item, errorMessage, new Date().toISOString());
+        return retrySnapshot;
+      });
+
+      if (retrySnapshot) {
+        this.lastError = `${options.retryMessagePrefix}이(가) 실패해 ${new Date(retrySnapshot.nextAttemptAt).toLocaleTimeString("ko-KR")}에 다시 시도합니다.`;
+      }
+    } else {
+      const blockedAt = new Date().toISOString();
+      this.orderQueue = this.orderQueue.map((item) => {
+        if (item.id !== queueItemId) {
+          return item;
+        }
+
+        return markQueueItemBlocked(item, errorMessage, blockedAt);
+      });
+      this.lastError = options.blockedMessage;
+      options.onBlocked?.(errorMessage, blockedAt);
+    }
+
+    await this.persist();
   }
 
   private async syncTrackedOrders() {
@@ -786,8 +1322,12 @@ export class TradingService {
       }
 
       const soldQuantity = Math.max(0, target.requestedQuantity - target.remainingQuantity);
+      const actualEntryPrice =
+        snapshot.filledAveragePrice > 0 ? toRoundedPrice(snapshot.filledAveragePrice) : target.entryPrice;
       const nextTargetBase: AutoSellTarget = {
         ...target,
+        entryPrice: actualEntryPrice,
+        targetPrice: toRoundedPrice(actualEntryPrice * (1 + target.targetProfitPercent / 100)),
         buyOrderStatus: snapshot.status,
         buyFilledQuantity: snapshot.filledQuantity,
         buyOpenQuantity: snapshot.openQuantity,
@@ -805,10 +1345,10 @@ export class TradingService {
           symbol: target.symbol,
           exchange: target.exchange,
           quantity: snapshot.filledQuantity,
-          entryPrice: target.entryPrice,
+          entryPrice: actualEntryPrice,
           triggerProfitPercent: 0,
           targetProfitPercent: target.targetProfitPercent,
-          orderPrice: target.entryPrice,
+          orderPrice: actualEntryPrice,
           status: "completed",
           reason: `원클릭 매수 주문이 전량 체결되어 ${snapshot.filledQuantity.toFixed(0)}주 자동매도 추적이 유지됩니다.`,
           createdAt: syncTimestamp,
@@ -827,10 +1367,10 @@ export class TradingService {
           symbol: target.symbol,
           exchange: target.exchange,
           quantity: target.requestedQuantity,
-          entryPrice: target.entryPrice,
+          entryPrice: actualEntryPrice,
           triggerProfitPercent: 0,
           targetProfitPercent: target.targetProfitPercent,
-          orderPrice: target.entryPrice,
+          orderPrice: actualEntryPrice,
           status: "failed",
           reason: "원클릭 매수 주문이 거래소 또는 증권사에서 거부되었습니다.",
           createdAt: syncTimestamp,
@@ -914,7 +1454,8 @@ export class TradingService {
       this.store.write({
         settings: this.settings,
         recentEvents: this.recentEvents,
-        autoSellTargets: this.autoSellTargets
+        autoSellTargets: this.autoSellTargets,
+        orderQueue: this.orderQueue
       }),
       this.profitLedgerStore.write({
         entries: this.profitLedgerEntries,

@@ -8,6 +8,7 @@ import { TradingWorkspace } from "./components/trading-workspace.js";
 import { useDesktopNotifications } from "./hooks/use-desktop-notifications.js";
 import { useDashboard } from "./hooks/use-dashboard.js";
 import { useFavoriteSymbols } from "./hooks/use-favorite-symbols.js";
+import { useFontScale, type FontScaleOption } from "./hooks/use-font-scale.js";
 import { useToastCenter } from "./hooks/use-toast-center.js";
 
 const usdCurrency = new Intl.NumberFormat("en-US", {
@@ -74,6 +75,15 @@ const DASHBOARD_TABS: DashboardTabItem[] = [
   }
 ];
 
+const FONT_SCALE_OPTIONS: Array<{
+  value: FontScaleOption;
+  label: string;
+}> = [
+  { value: "default", label: "기본" },
+  { value: "large", label: "크게" },
+  { value: "xlarge", label: "아주 크게" }
+];
+
 export default function App() {
   const [buyPresetSelection, setBuyPresetSelection] = useState<{
     symbol: string;
@@ -82,6 +92,7 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<DashboardTabKey>("trade");
   const seenEventIdsRef = useRef(new Set<string>());
   const { toasts, pushToast, dismissToast } = useToastCenter();
+  const { fontScale, setFontScale } = useFontScale();
   const {
     permission: desktopNotificationPermission,
     supported: desktopNotificationSupported,
@@ -156,6 +167,22 @@ export default function App() {
             원하는 미국 종목을 원클릭으로 매수하면 그 수량만 별도로 추적해서 목표 수익률 도달 시 자동 매도 주문을 내고,
             미국 우량주/테마/섹터 데이터를 코덱스로 해석해 대시보드에 보여줍니다.
           </p>
+          <div className="font-scale-card" role="group" aria-label="글씨 크기 조절">
+            <span className="font-scale-label">글씨 크기</span>
+            <div className="font-scale-controls">
+              {FONT_SCALE_OPTIONS.map((option) => (
+                <button
+                  key={option.value}
+                  type="button"
+                  className={`font-scale-button ${fontScale === option.value ? "active" : ""}`}
+                  aria-pressed={fontScale === option.value}
+                  onClick={() => setFontScale(option.value)}
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
+          </div>
         </div>
         <div className="hero-meta">
           <div className="hero-stat">

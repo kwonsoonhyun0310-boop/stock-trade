@@ -1,4 +1,4 @@
-import type { AutoSellEvent, AutoSellTarget, TradingStatus } from "@trade/shared";
+import type { AutoSellEvent, AutoSellTarget, TradingOrderQueueItem, TradingStatus } from "@trade/shared";
 
 interface OrderStatusPanelProps {
   trading: TradingStatus;
@@ -54,6 +54,45 @@ const getStatusTone = (status: AutoSellTarget["buyOrderStatus"] | AutoSellEvent[
   }
 };
 
+const getQueueStatusLabel = (status: TradingOrderQueueItem["status"]) => {
+  switch (status) {
+    case "running":
+      return "전송 중";
+    case "retry_wait":
+      return "재시도 대기";
+    case "blocked":
+      return "재시도 중단";
+    default:
+      return "대기열";
+  }
+};
+
+const getQueueKindLabel = (kind: TradingOrderQueueItem["kind"]) => {
+  switch (kind) {
+    case "one_click_buy":
+      return "원클릭 매수";
+    case "buy_modify":
+      return "매수 정정";
+    case "buy_cancel":
+      return "매수 취소";
+    default:
+      return "자동매도";
+  }
+};
+
+const getQueueStatusTone = (status: TradingOrderQueueItem["status"]) => {
+  switch (status) {
+    case "running":
+      return "submitted";
+    case "retry_wait":
+      return "pending";
+    case "blocked":
+      return "failed";
+    default:
+      return "pending";
+  }
+};
+
 const toSellOrderSnapshot = (events: AutoSellEvent[]) => {
   const latestByKey = new Map<string, AutoSellEvent>();
 
@@ -78,6 +117,7 @@ export function OrderStatusPanel({ trading }: OrderStatusPanelProps) {
     .filter((target) => Boolean(target.buyOrderNumber))
     .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
   const sellOrders = toSellOrderSnapshot(trading.recentEvents);
+  const queuedOrders = [...trading.orderQueue].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
 
   return (
     <section className="panel">
@@ -116,6 +156,41 @@ export function OrderStatusPanel({ trading }: OrderStatusPanelProps) {
                     <span>미체결수량 {target.buyOpenQuantity.toFixed(0)}주</span>
                     <span>자동매도 남은수량 {target.remainingQuantity.toFixed(0)}주</span>
                     <span>최근 확인 {target.buyOrderUpdatedAt ? new Date(target.buyOrderUpdatedAt).toLocaleString() : "아직 없음"}</span>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+
+        <section className="order-status-section">
+          <div className="order-status-section-header">
+            <strong>주문 재시도 큐</strong>
+            <span>자동매도 주문 실패 시 여기서 재시도 대기와 중복 차단 상태를 확인합니다.</span>
+          </div>
+
+          {queuedOrders.length === 0 ? (
+            <p className="empty-state compact-empty-state">현재 재시도 중인 자동매도 주문이 없습니다.</p>
+          ) : (
+            <ul className="order-status-list">
+              {queuedOrders.map((item) => (
+                <li key={item.id} className="order-status-card">
+                  <div className="order-status-header">
+                    <strong>
+                      {item.symbol} / {item.exchange}
+                    </strong>
+                    <span className={`order-status-pill ${getQueueStatusTone(item.status)}`}>
+                      {getQueueStatusLabel(item.status)}
+                    </span>
+                  </div>
+                  <div className="order-status-meta">
+                    <span>작업 {getQueueKindLabel(item.kind)}</span>
+                    <span>대상수량 {item.quantity.toFixed(0)}주</span>
+                    <span>주문가 {item.limitPrice.toFixed(2)} USD</span>
+                    <span>시도횟수 {item.attemptCount}회</span>
+                    <span>다음 시도 {new Date(item.nextAttemptAt).toLocaleString()}</span>
+                    {item.lastAttemptAt ? <span>최근 시도 {new Date(item.lastAttemptAt).toLocaleString()}</span> : null}
+                    {item.lastError ? <span>{item.lastError}</span> : null}
                   </div>
                 </li>
               ))}

@@ -67,6 +67,8 @@ export function AutoSellPanel({
   const [inlineError, setInlineError] = useState<string | null>(null);
   const [inlineErrorTargetId, setInlineErrorTargetId] = useState<string | null>(null);
   const activeTargets = trading.autoSellTargets.filter((target) => target.status === "armed");
+  const queuedOrderCount = trading.orderQueue.filter((item) => item.status !== "blocked").length;
+  const blockedOrderCount = trading.orderQueue.filter((item) => item.status === "blocked").length;
   const pollIntervalSeconds = Math.round(trading.settings.pollIntervalMs / 1000);
 
   const startEditing = (target: AutoSellTarget) => {
@@ -126,6 +128,12 @@ export function AutoSellPanel({
         <div className="status-block">
           <span>최근 자동매도 확인</span>
           <strong>{formatShortDateTime(trading.lastCheckedAt)}</strong>
+        </div>
+        <div className="status-block">
+          <span>재시도 큐</span>
+          <strong>
+            대기 {queuedOrderCount}건{blockedOrderCount > 0 ? ` / 중단 ${blockedOrderCount}건` : ""}
+          </strong>
         </div>
         <div className="status-block">
           <span>계좌 상세 확인</span>

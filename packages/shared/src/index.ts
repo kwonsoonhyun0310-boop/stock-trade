@@ -44,6 +44,25 @@ export interface AutoSellEvent {
   orderNumber?: string;
 }
 
+export interface TradingOrderQueueItem {
+  id: string;
+  kind: "auto_sell" | "one_click_buy" | "buy_modify" | "buy_cancel";
+  targetId: string;
+  symbol: string;
+  exchange: ExchangeCode;
+  quantity: number;
+  limitPrice: number;
+  triggerProfitPercent: number;
+  targetProfitPercent: number;
+  status: "queued" | "running" | "retry_wait" | "blocked";
+  attemptCount: number;
+  createdAt: string;
+  updatedAt: string;
+  nextAttemptAt: string;
+  lastAttemptAt?: string;
+  lastError?: string;
+}
+
 export type ProfitLedgerRangeCode = "1d" | "7d" | "14d" | "30d" | "6m" | "1y";
 
 export interface ProfitLedgerEntry {
@@ -57,6 +76,9 @@ export interface ProfitLedgerEntry {
   realizedProfitUsd: number;
   realizedProfitPercent: number;
   targetProfitPercent: number;
+  costBasisMode: "exact_fifo" | "estimated_fifo";
+  matchedQuantity: number;
+  estimatedQuantity: number;
   completedAt: string;
   orderNumber?: string;
 }
@@ -80,6 +102,8 @@ export interface ProfitLedgerSnapshot {
   updatedAt: string;
   totalRealizedProfitUsd: number;
   totalTradeCount: number;
+  exactTradeCount: number;
+  estimatedTradeCount: number;
   ranges: ProfitLedgerRangeSummary[];
   recentEntries: ProfitLedgerEntry[];
 }
@@ -147,6 +171,34 @@ export interface SymbolSearchResult {
   quoteType: "EQUITY" | "ETF";
 }
 
+export interface WatchlistSymbolInput {
+  symbol: string;
+  name: string;
+  exchange: ExchangeCode;
+  exchangeLabel: string;
+}
+
+export interface WatchlistQuote {
+  symbol: string;
+  name: string;
+  exchange: ExchangeCode;
+  exchangeLabel: string;
+  currentPrice: number;
+  previousClose: number;
+  dayChangeUsd: number;
+  dayChangePercent: number;
+  oneMonthReturn: number;
+  threeMonthReturn: number;
+  monitoringLabel: string;
+  momentumTone: "positive" | "neutral" | "negative";
+  lastUpdatedAt: string;
+}
+
+export interface WatchlistMonitorSnapshot {
+  updatedAt: string;
+  items: WatchlistQuote[];
+}
+
 export interface TradingStatus {
   settings: AutoSellSettings;
   monitorRunning: boolean;
@@ -155,6 +207,7 @@ export interface TradingStatus {
   holdings: HoldingSnapshot[];
   accountSummary: AccountSummary;
   autoSellTargets: AutoSellTarget[];
+  orderQueue: TradingOrderQueueItem[];
   recentEvents: AutoSellEvent[];
   profitLedger: ProfitLedgerSnapshot;
 }

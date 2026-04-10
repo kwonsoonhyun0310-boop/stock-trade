@@ -3,13 +3,15 @@ import type {
   OneClickBuyPrecheckResponse,
   OneClickBuyRequest,
   OneClickBuyResponse,
-  TradingStatus
+  TradingStatus,
+  WatchlistSymbolInput
 } from "@trade/shared";
 import { AutoSellPanel } from "./auto-sell-panel.js";
-import { FavoriteSymbolsPanel } from "./favorite-symbols-panel.js";
 import { OneClickBuyPanel } from "./one-click-buy-panel.js";
 import { OrderStatusPanel } from "./order-status-panel.js";
+import { WatchlistMonitorPanel } from "./watchlist-monitor-panel.js";
 import type { FavoriteSymbol } from "../lib/favorite-symbols.js";
+import { useWatchlistMonitor } from "../hooks/use-watchlist-monitor.js";
 
 interface TradingWorkspaceProps {
   trading: TradingStatus;
@@ -51,6 +53,22 @@ export function TradingWorkspace({
   onCancelBuyOrder,
   onRefreshDetails
 }: TradingWorkspaceProps) {
+  const watchlistFavorites: WatchlistSymbolInput[] = favorites.map((favorite) => ({
+    symbol: favorite.symbol,
+    name: favorite.name,
+    exchange: favorite.exchange,
+    exchangeLabel: favorite.exchangeLabel
+  }));
+  const {
+    snapshot: watchlistSnapshot,
+    loading: watchlistLoading,
+    refreshing: watchlistRefreshing,
+    error: watchlistError,
+    refresh: refreshWatchlist
+  } = useWatchlistMonitor({
+    favorites: watchlistFavorites
+  });
+
   return (
     <section className="tab-panel-stack">
       <section className="top-grid">
@@ -65,10 +83,15 @@ export function TradingWorkspace({
             onPrecheck={onPrecheck}
             onSubmit={onSubmit}
           />
-          <FavoriteSymbolsPanel
+          <WatchlistMonitorPanel
             favorites={favorites}
+            snapshot={watchlistSnapshot}
+            loading={watchlistLoading}
+            refreshing={watchlistRefreshing}
+            error={watchlistError}
             onQuickPick={onQuickPick}
             onRemove={onRemoveFavorite}
+            onRefresh={refreshWatchlist}
           />
         </div>
 

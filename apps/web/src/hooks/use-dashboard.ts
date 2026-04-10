@@ -25,11 +25,14 @@ const emptyDashboard: DashboardResponse = {
       currency: "USD"
     },
     autoSellTargets: [],
+    orderQueue: [],
     recentEvents: [],
     profitLedger: {
       updatedAt: new Date(0).toISOString(),
       totalRealizedProfitUsd: 0,
       totalTradeCount: 0,
+      exactTradeCount: 0,
+      estimatedTradeCount: 0,
       ranges: [
         { code: "1d", label: "1일", realizedProfitUsd: 0, tradeCount: 0, chart: [] },
         { code: "7d", label: "7일", realizedProfitUsd: 0, tradeCount: 0, chart: [] },
