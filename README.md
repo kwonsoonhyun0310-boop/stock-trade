@@ -21,6 +21,13 @@ packages/
   shared/   공통 타입
 ```
 
+## GitHub Pages 데모
+
+- 제출용 정적 데모: [https://kwonsoonhyun0310-boop.github.io/stock-trade/](https://kwonsoonhyun0310-boop.github.io/stock-trade/)
+- 이 링크는 `GitHub Pages` 전용 데모 모드로 배포됩니다.
+- 즉, 화면과 사용자 흐름은 그대로 보이지만 한국투자증권 실거래 API와 실제 자동매도 주문은 동작하지 않습니다.
+- 실거래/KIS 연동은 아래 로컬 또는 별도 백엔드 배포 환경에서만 동작합니다.
+
 ## Codex 사용 방식
 
 이 프로젝트는 OpenAI API 키를 직접 쓰지 않고 로컬 `codex` 명령을 호출합니다.
@@ -88,6 +95,12 @@ npm run dev:web
 ```bash
 npm run build
 npm run start
+```
+
+GitHub Pages 데모 빌드:
+
+```bash
+npm run build:pages
 ```
 
 ## UI 사용

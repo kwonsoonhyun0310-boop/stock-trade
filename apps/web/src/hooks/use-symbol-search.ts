@@ -1,6 +1,7 @@
 import { startTransition, useDeferredValue, useEffect, useRef, useState } from "react";
 import type { SymbolSearchResult } from "@trade/shared";
-import { apiFetch } from "../api/client.js";
+import { DEMO_MODE, apiFetch } from "../api/client.js";
+import { searchDemoSymbols } from "../demo/demo-api.js";
 
 export function useSymbolSearch(query: string) {
   const deferredQuery = useDeferredValue(query.trim());
@@ -33,12 +34,14 @@ export function useSymbolSearch(query: string) {
       setLoading(true);
 
       try {
-        const nextResults = await apiFetch<SymbolSearchResult[]>(
-          `/api/market/symbol-search?q=${encodeURIComponent(deferredQuery)}`,
-          {
-            signal: controller.signal
-          }
-        );
+        const nextResults = DEMO_MODE
+          ? await searchDemoSymbols(deferredQuery)
+          : await apiFetch<SymbolSearchResult[]>(
+              `/api/market/symbol-search?q=${encodeURIComponent(deferredQuery)}`,
+              {
+                signal: controller.signal
+              }
+            );
 
         cacheRef.current.set(deferredQuery, nextResults);
         startTransition(() => {

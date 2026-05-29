@@ -1,6 +1,7 @@
 import { startTransition, useEffect, useEffectEvent, useState } from "react";
 import type { WatchlistMonitorSnapshot, WatchlistSymbolInput } from "@trade/shared";
-import { apiFetch } from "../api/client.js";
+import { DEMO_MODE, apiFetch } from "../api/client.js";
+import { getDemoWatchlistQuotes } from "../demo/demo-api.js";
 
 const WATCHLIST_REFRESH_INTERVAL_MS = 60_000;
 
@@ -41,12 +42,14 @@ export function useWatchlistMonitor({ favorites }: UseWatchlistMonitorOptions) {
     }
 
     try {
-      const nextSnapshot = await apiFetch<WatchlistMonitorSnapshot>("/api/market/watchlist/quotes", {
-        method: "POST",
-        body: JSON.stringify({
-          favorites
-        })
-      });
+      const nextSnapshot = DEMO_MODE
+        ? await getDemoWatchlistQuotes(favorites)
+        : await apiFetch<WatchlistMonitorSnapshot>("/api/market/watchlist/quotes", {
+            method: "POST",
+            body: JSON.stringify({
+              favorites
+            })
+          });
 
       startTransition(() => {
         setSnapshot(nextSnapshot);

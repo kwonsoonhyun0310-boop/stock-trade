@@ -10,6 +10,7 @@
     "dev:server": "npm run dev -w @trade/server",
     "dev:web": "npm run dev -w @trade/web",
     "build": "npm run build -w @trade/shared && npm run build -w @trade/server && npm run build -w @trade/web",
+    "build:pages": "npm run build -w @trade/shared && VITE_DEMO_MODE=true VITE_BASE_PATH=/stock-trade/ npm run build -w @trade/web",
     "lint": "npm run lint -w @trade/shared && npm run lint -w @trade/server && npm run lint -w @trade/web",
     "start": "npm run start -w @trade/server"
   },

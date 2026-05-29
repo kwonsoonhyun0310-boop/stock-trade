@@ -131,6 +131,26 @@ h3 {
   line-height: 1.7;
 }
 
+.demo-banner {
+  display: grid;
+  gap: 6px;
+  padding: 14px 16px;
+  border-radius: 18px;
+  border: 1px solid rgba(207, 106, 50, 0.18);
+  background: rgba(207, 106, 50, 0.08);
+}
+
+.demo-banner strong {
+  font-size: 0.96rem;
+  color: var(--accent);
+}
+
+.demo-banner span {
+  color: var(--muted);
+  line-height: 1.6;
+  font-size: 0.9rem;
+}
+
 .hero-copy {
   display: grid;
   gap: 16px;

@@ -109,7 +109,9 @@ export default function App() {
     submitOneClickBuy,
     cancelAutoSellTarget,
     modifyBuyOrder,
-    cancelBuyOrder
+    cancelBuyOrder,
+    demoMode,
+    apiBaseUrl
   } = useDashboard();
 
   useEffect(() => {
@@ -167,6 +169,14 @@ export default function App() {
             원하는 미국 종목을 원클릭으로 매수하면 그 수량만 별도로 추적해서 목표 수익률 도달 시 자동 매도 주문을 내고,
             미국 우량주/테마/섹터 데이터를 코덱스로 해석해 대시보드에 보여줍니다.
           </p>
+          {demoMode ? (
+            <div className="demo-banner">
+              <strong>GitHub Pages 데모 모드</strong>
+              <span>
+                이 링크는 제출용 정적 데모입니다. 실거래/KIS 연동 없이 UI와 자동매매 흐름을 샘플 데이터로 보여줍니다.
+              </span>
+            </div>
+          ) : null}
           <div className="font-scale-card" role="group" aria-label="글씨 크기 조절">
             <span className="font-scale-label">글씨 크기</span>
             <div className="font-scale-controls">
@@ -211,6 +221,10 @@ export default function App() {
             <span>Codex 로그인</span>
             <strong>{data.llm.loginStatus || "확인 중"}</strong>
           </div>
+          <div className="hero-stat">
+            <span>현재 연결</span>
+            <strong>{demoMode ? "정적 데모 데이터" : apiBaseUrl}</strong>
+          </div>
           <div className="hero-actions">
             <button
               className="primary-button hero-button"
@@ -238,7 +252,9 @@ export default function App() {
             {!desktopNotificationSupported ? (
               <span className="sync-status">이 브라우저는 데스크톱 알림을 지원하지 않습니다.</span>
             ) : null}
-            <span className="sync-status">계좌 상태 새로고침하며 확인중.</span>
+            <span className="sync-status">
+              {demoMode ? "데모 데이터 기준으로 화면을 갱신합니다." : "계좌 상태 새로고침하며 확인중."}
+            </span>
           </div>
         </div>
       </section>

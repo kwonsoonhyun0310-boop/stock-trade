@@ -6,7 +6,17 @@ import type {
   OneClickBuyRequest,
   OneClickBuyResponse
 } from "@trade/shared";
-import { apiFetch } from "../api/client.js";
+import { API_BASE_URL, DEMO_MODE, apiFetch } from "../api/client.js";
+import {
+  cancelDemoAutoSellTarget,
+  cancelDemoBuyOrder,
+  getDemoDashboard,
+  getDemoTradingStatus,
+  modifyDemoBuyOrder,
+  precheckDemoOneClickBuy,
+  refreshDemoTradingStatus,
+  submitDemoOneClickBuy
+} from "../demo/demo-api.js";
 
 const emptyDashboard: DashboardResponse = {
   trading: {
@@ -69,6 +79,11 @@ export function useDashboard() {
   const [backgroundRefreshing, setBackgroundRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const getDashboard = async () =>
+    DEMO_MODE ? getDemoDashboard() : apiFetch<DashboardResponse>("/api/dashboard");
+  const getTradingStatus = async () =>
+    DEMO_MODE ? getDemoTradingStatus() : apiFetch<DashboardResponse["trading"]>("/api/trading/status");
+
   const loadDashboard = useEffectEvent(async (mode: "manual" | "background" = "background") => {
     if (mode === "manual") {
       setRefreshing(true);
@@ -77,7 +92,7 @@ export function useDashboard() {
     }
 
     try {
-      const nextData = await apiFetch<DashboardResponse>("/api/dashboard");
+      const nextData = await getDashboard();
       if (mode === "manual") {
         setError(null);
       }
@@ -109,7 +124,7 @@ export function useDashboard() {
 
   const loadTradingStatus = useEffectEvent(async () => {
     try {
-      const trading = await apiFetch<DashboardResponse["trading"]>("/api/trading/status");
+      const trading = await getTradingStatus();
       startTransition(() => {
         setData((current) => ({ ...current, trading }));
       });
@@ -128,6 +143,11 @@ export function useDashboard() {
   }, [data.trading.settings.pollIntervalMs, loadTradingStatus]);
 
   const updateSettings = async (settings: Partial<AutoSellSettings>) => {
+    if (DEMO_MODE) {
+      setError("데모 모드에서는 자동매도 설정 저장을 잠가두었습니다.");
+      return;
+    }
+
     const trading = await apiFetch<DashboardResponse["trading"]>("/api/trading/settings", {
       method: "POST",
       body: JSON.stringify(settings)
@@ -137,22 +157,35 @@ export function useDashboard() {
   };
 
   const submitOneClickBuy = async (order: OneClickBuyRequest) => {
-    const result = await apiFetch<OneClickBuyResponse>("/api/trading/one-click-buy", {
-      method: "POST",
-      body: JSON.stringify(order)
-    });
+    const result = DEMO_MODE
+      ? await submitDemoOneClickBuy(order)
+      : await apiFetch<OneClickBuyResponse>("/api/trading/one-click-buy", {
+          method: "POST",
+          body: JSON.stringify(order)
+        });
 
     await loadDashboard("background");
     return result;
   };
 
   const precheckOneClickBuy = async (order: OneClickBuyRequest) =>
-    apiFetch<OneClickBuyPrecheckResponse>("/api/trading/one-click-buy/precheck", {
-      method: "POST",
-      body: JSON.stringify(order)
-    });
+    DEMO_MODE
+      ? precheckDemoOneClickBuy(order)
+      : apiFetch<OneClickBuyPrecheckResponse>("/api/trading/one-click-buy/precheck", {
+          method: "POST",
+          body: JSON.stringify(order)
+        });
 
   const refresh = async () => {
+    if (DEMO_MODE) {
+      const trading = await refreshDemoTradingStatus();
+      startTransition(() => {
+        setData((current) => ({ ...current, trading }));
+      });
+      setError(null);
+      return;
+    }
+
     await apiFetch("/api/trading/refresh", {
       method: "POST"
     });
@@ -161,9 +194,11 @@ export function useDashboard() {
 
   const cancelAutoSellTarget = async (targetId: string) => {
     try {
-      const trading = await apiFetch<DashboardResponse["trading"]>(`/api/trading/targets/${targetId}/cancel`, {
-        method: "POST"
-      });
+      const trading = DEMO_MODE
+        ? await cancelDemoAutoSellTarget(targetId)
+        : await apiFetch<DashboardResponse["trading"]>(`/api/trading/targets/${targetId}/cancel`, {
+            method: "POST"
+          });
 
       setError(null);
       setData((current) => (current ? { ...current, trading } : current));
@@ -175,13 +210,15 @@ export function useDashboard() {
 
   const modifyBuyOrder = async (targetId: string, limitPrice: number) => {
     try {
-      const trading = await apiFetch<DashboardResponse["trading"]>(
-        `/api/trading/targets/${targetId}/buy-order/modify`,
-        {
-          method: "POST",
-          body: JSON.stringify({ limitPrice })
-        }
-      );
+      const trading = DEMO_MODE
+        ? await modifyDemoBuyOrder(targetId, limitPrice)
+        : await apiFetch<DashboardResponse["trading"]>(
+            `/api/trading/targets/${targetId}/buy-order/modify`,
+            {
+              method: "POST",
+              body: JSON.stringify({ limitPrice })
+            }
+          );
 
       setError(null);
       setData((current) => (current ? { ...current, trading } : current));
@@ -193,12 +230,14 @@ export function useDashboard() {
 
   const cancelBuyOrder = async (targetId: string) => {
     try {
-      const trading = await apiFetch<DashboardResponse["trading"]>(
-        `/api/trading/targets/${targetId}/buy-order/cancel`,
-        {
-          method: "POST"
-        }
-      );
+      const trading = DEMO_MODE
+        ? await cancelDemoBuyOrder(targetId)
+        : await apiFetch<DashboardResponse["trading"]>(
+            `/api/trading/targets/${targetId}/buy-order/cancel`,
+            {
+              method: "POST"
+            }
+          );
 
       setError(null);
       setData((current) => (current ? { ...current, trading } : current));
@@ -219,6 +258,8 @@ export function useDashboard() {
     submitOneClickBuy,
     cancelAutoSellTarget,
     modifyBuyOrder,
-    cancelBuyOrder
+    cancelBuyOrder,
+    demoMode: DEMO_MODE,
+    apiBaseUrl: API_BASE_URL
   };
 }
